@@ -3,97 +3,119 @@ import 'package:mandubi/models/visit.dart';
 import 'package:mandubi/services/firestore_service.dart';
 
 class VisitsController extends GetxController {
-  final FirestoreService _firestoreService = FirestoreService();
-
-  RxList<Visit> allVisits = RxList<Visit>();
-  RxList<Visit> todayVisits = RxList<Visit>();
-  RxList<Visit> overdueVisits = RxList<Visit>();
-  RxList<Visit> upcomingVisits = RxList<Visit>();
-  RxBool isLoading = RxBool(false);
+  final firestoreService = FirestoreService();
+  
+  final RxList<Visit> visits = <Visit>[].obs;
+  final RxList<Visit> todayVisits = <Visit>[].obs;
+  final RxList<Visit> overdueVisits = <Visit>[].obs;
+  final RxList<Visit> upcomingVisits = <Visit>[].obs;
+  final RxBool isLoading = false.obs;
+  final RxString errorMessage = ''.obs;
 
   @override
   void onInit() {
     super.onInit();
     fetchAllVisits();
-    _firestoreService.getVisitsStream().listen((visits) {
-      allVisits.value = visits;
-      _categorizeVisits();
-    });
   }
 
   Future<void> fetchAllVisits() async {
     try {
       isLoading.value = true;
-      final visits = await _firestoreService.getAllVisits();
-      allVisits.value = visits;
-      _categorizeVisits();
+      errorMessage.value = '';
+      final allVisits = await firestoreService.getAllVisits();
+      visits.assignAll(allVisits);
+      categorizeVisits();
     } catch (e) {
-      Get.snackbar('خطأ', 'فشل تحميل الزيارات');
+      errorMessage.value = 'خطأ في تحميل الزيارات: $e';
+      Get.snackbar('خطأ', errorMessage.value, duration: const Duration(seconds: 3));
     } finally {
       isLoading.value = false;
     }
   }
 
-  void _categorizeVisits() {
+  void categorizeVisits() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final tomorrow = today.add(const Duration(days: 1));
 
-    todayVisits.value = allVisits
-        .where((visit) =>
-            visit.nextFollowUpDate.isAfter(today) &&
-            visit.nextFollowUpDate.isBefore(tomorrow))
-        .toList();
+    todayVisits.clear();
+    overdueVisits.clear();
+    upcomingVisits.clear();
 
-    overdueVisits.value = allVisits
-        .where((visit) => visit.nextFollowUpDate.isBefore(today))
-        .toList();
-
-    upcomingVisits.value = allVisits
-        .where((visit) =>
-            visit.nextFollowUpDate.isAfter(tomorrow) ||
-            visit.nextFollowUpDate.isAtSameMomentAs(tomorrow))
-        .toList();
-  }
-
-  Future<void> addVisit({
-    required String doctorId,
-    required String doctorName,
-    required DateTime visitDate,
-    required String productsDetailed,
-    required String samplesGiven,
-    required String feedbackNotes,
-    required DateTime nextFollowUpDate,
-  }) async {
-    try {
-      final visit = Visit(
-        doctorId: doctorId,
-        doctorName: doctorName,
-        visitDate: visitDate,
-        productsDetailed: productsDetailed,
-        samplesGiven: samplesGiven,
-        feedbackNotes: feedbackNotes,
-        nextFollowUpDate: nextFollowUpDate,
+    for (final visit in visits) {
+      final visitDate = DateTime(
+        visit.nextFollowUpDate.year,
+        visit.nextFollowUpDate.month,
+        visit.nextFollowUpDate.day,
       );
 
-      await _firestoreService.addVisit(visit);
-      fetchAllVisits();
+      if (visitDate.isBefore(today)) {
+        // زيارة متأخرة
+        overdueVisits.add(visit);
+      } else if (visitDate.isAtSameMomentAs(today)) {
+        // زيارة اليوم
+        todayVisits.add(visit);
+      } else if (visitDate.isBefore(tomorrow.add(const Duration(days: 7)))) {
+        // زيارات قادمة خلال أسبوع
+        upcomingVisits.add(visit);
+      }
+    }
+
+    // Sort by date
+    todayVisits.sort((a, b) => a.nextFollowUpDate.compareTo(b.nextFollowUpDate));
+    overdueVisits.sort((a, b) => a.nextFollowUpDate.compareTo(b.nextFollowUpDate));
+    upcomingVisits.sort((a, b) => a.nextFollowUpDate.compareTo(b.nextFollowUpDate));
+  }
+
+  Future<Visit> addVisit(Visit visit) async {
+    try {
+      isLoading.value = true;
+      final newVisit = await firestoreService.addVisit(visit);
+      visits.add(newVisit);
+      categorizeVisits();
+      Get.snackbar('نجح', 'تم إضافة الزيارة بنجاح');
+      return newVisit;
     } catch (e) {
-      Get.snackbar('خطأ', 'فشل إضافة الزيارة');
+      errorMessage.value = 'خطأ في إضافة الزيارة: $e';
+      Get.snackbar('خطأ', errorMessage.value);
+      rethrow;
+    } finally {
+      isLoading.value = false;
     }
   }
 
-  List<Visit> getVisitsByDoctor(String doctorId) {
-    return allVisits.where((visit) => visit.doctorId == doctorId).toList();
+  Future<void> updateVisit(Visit visit) async {
+    try {
+      isLoading.value = true;
+      await firestoreService.updateVisit(visit);
+      final index = visits.indexWhere((v) => v.id == visit.id);
+      if (index != -1) {
+        visits[index] = visit;
+      }
+      categorizeVisits();
+      Get.snackbar('نجح', 'تم تحديث الزيارة');
+    } catch (e) {
+      errorMessage.value = 'خطأ في تحديث الزيارة: $e';
+      Get.snackbar('خطأ', errorMessage.value);
+      rethrow;
+    } finally {
+      isLoading.value = false;
+    }
   }
 
-  Future<void> deleteVisit(String id) async {
+  Future<void> deleteVisit(String visitId) async {
     try {
-      await _firestoreService.deleteVisit(id);
-      fetchAllVisits();
-      Get.snackbar('نجاح', 'تم حذف الزيارة');
+      isLoading.value = true;
+      await firestoreService.deleteVisit(visitId);
+      visits.removeWhere((v) => v.id == visitId);
+      categorizeVisits();
+      Get.snackbar('نجح', 'تم حذف الزيارة');
     } catch (e) {
-      Get.snackbar('خطأ', 'فشل حذف الزيارة');
+      errorMessage.value = 'خطأ في حذف الزيارة: $e';
+      Get.snackbar('خطأ', errorMessage.value);
+      rethrow;
+    } finally {
+      isLoading.value = false;
     }
   }
 
